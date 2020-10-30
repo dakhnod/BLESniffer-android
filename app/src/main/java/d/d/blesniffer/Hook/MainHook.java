@@ -13,8 +13,14 @@ import android.util.Log;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
+import java.security.Key;
+import java.security.spec.AlgorithmParameterSpec;
 import java.util.HashMap;
 import java.util.List;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -37,7 +43,62 @@ public class MainHook implements IXposedHookLoadPackage {
         hookBLENotify(pck);
         hookBLEWrite();
 
+        hookFossil(pck);
+
+        hookCrypto();
+
         log("hooked");
+    }
+
+    private void hookCrypto() {
+        findAndHookMethod(Cipher.class, "init", int.class, Key.class, AlgorithmParameterSpec.class, new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                super.beforeHookedMethod(param);
+                Key key = (Key) param.args[1];
+                AlgorithmParameterSpec spec = (AlgorithmParameterSpec) param.args[2];
+                if(spec instanceof IvParameterSpec){
+                    IvParameterSpec iv = (IvParameterSpec) spec;
+                    log("key: " + bytesToHex(key.getEncoded()) + "   iv: " + bytesToHex(iv.getIV()));
+                }
+            }
+        });
+    }
+
+    private void hookFossil(final XC_LoadPackage.LoadPackageParam pck){
+        if(pck.packageName.equals("com.fossil.wearables.fossil")){
+            findAndHookMethod("com.fossil.crypto.EllipticCurveKeyPair$CppProxy", pck.classLoader, "create", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    super.afterHookedMethod(param);
+
+                    log("KeyPair create() called");
+
+                    Method method = param.getResult().getClass().getDeclaredMethod("publicKey");
+                    method.setAccessible(true);
+                    byte[] publicKey = (byte[]) method.invoke(param.getResult());
+
+                    method = param.getResult().getClass().getDeclaredMethod("privateKey");
+                    method.setAccessible(true);
+                    byte[] privateKey = (byte[]) method.invoke(param.getResult());
+
+                    log("public key: " + bytesToHex(publicKey));
+                    log("privateKey key: " + bytesToHex(privateKey));
+                }
+            });
+
+            findAndHookConstructor(SecretKeySpec.class, byte[].class, String.class, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    super.beforeHookedMethod(param);
+                    String alg = (String) param.args[1];
+                    byte[] key = (byte[]) param.args[0];
+
+                    if(!alg.equals("AES") || key.length != 16) return;
+                    log("SecretKeySpec(): " + param.args[1] + "   " + bytesToHex((byte[]) param.args[0]));
+                }
+            });
+        }
     }
 
     private BluetoothGatt getDeviceGatt(String address){
