@@ -8,7 +8,11 @@ import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattServer;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothSocket;
+import android.util.Base64;
 import android.util.Log;
+
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -74,9 +78,27 @@ public class MainHook implements IXposedHookLoadPackage {
 
                 BluetoothGattCharacteristic characteristic = getCharacteristicById(gatt, instanceId);
 
-                log("characteristic change " + characteristic.getUuid() + " " + bytesToHex(value));
+                JSONObject eventObject = new JSONObject()
+                        .put("characteristic", characteristic.getUuid())
+                        .put("payload", Base64.encodeToString(value, 0));
+
+                logEvent("ble_notify_characteristic", eventObject);
             }
         });
+    }
+
+    private void logEvent(String eventType, JSONObject eventDate){
+        JSONObject fullObject = null;
+        try {
+            fullObject = new JSONObject()
+                    .put("event", eventType)
+                    .put("data", eventDate);
+
+            log("event " + fullObject.toString());
+        } catch (JSONException e) {
+            log("error sending event");
+            e.printStackTrace();
+        }
     }
 
     private void hookBLEWrite(){
@@ -92,7 +114,11 @@ public class MainHook implements IXposedHookLoadPackage {
                     gattServers.put(gatt.getDevice().getAddress(), gatt);
                 }
 
-                log("characteristic write " + characteristic.getUuid() + " " + bytesToHex(characteristic.getValue()));
+                JSONObject eventObject = new JSONObject()
+                        .put("characteristic", characteristic.getUuid())
+                        .put("payload", Base64.encodeToString(characteristic.getValue(), 0));
+
+                logEvent("ble_write_characteristic", eventObject);
             }
         });
 
@@ -108,7 +134,11 @@ public class MainHook implements IXposedHookLoadPackage {
                     gattServers.put(gatt.getDevice().getAddress(), gatt);
                 }
 
-                log("descriptor write " + descriptor.getUuid() + "  " + bytesToHex(descriptor.getValue()));
+                JSONObject eventObject = new JSONObject()
+                        .put("descriptor", descriptor.getUuid())
+                        .put("payload", Base64.encodeToString(descriptor.getValue(), 0));
+
+                logEvent("ble_write_descriptor", eventObject);
             }
         });
     }
