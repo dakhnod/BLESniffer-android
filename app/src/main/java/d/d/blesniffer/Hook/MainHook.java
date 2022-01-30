@@ -1,28 +1,25 @@
 package d.d.blesniffer.Hook;
 
-import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
-import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
-import android.bluetooth.BluetoothGattServer;
 import android.bluetooth.BluetoothGattService;
-import android.bluetooth.BluetoothSocket;
 import android.util.Base64;
 import android.util.Log;
 
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.lang.reflect.Method;
+import java.lang.reflect.Field;
 import java.util.HashMap;
 import java.util.List;
 
+import javax.crypto.Cipher;
+import javax.crypto.KeyAgreement;
+import javax.crypto.spec.IvParameterSpec;
+
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 import static de.robv.android.xposed.XposedHelpers.findAndHookConstructor;
@@ -38,8 +35,10 @@ public class MainHook implements IXposedHookLoadPackage {
 
         log("hooking");
 
+        hookBLClassicStreams(pck);
         hookBLENotify(pck);
         hookBLEWrite();
+        hookCipher();
 
         log("hooked");
     }
@@ -58,6 +57,32 @@ public class MainHook implements IXposedHookLoadPackage {
         }
 
         return null;
+    }
+
+    private void hookBLClassicStreams(final XC_LoadPackage.LoadPackageParam pck){
+        findAndHookMethod("android.bluetooth.BluetoothOutputStream", pck.classLoader, "write", byte[].class, int.class, int.class, new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                super.afterHookedMethod(param);
+
+                byte[] data = (byte[]) param.args[0];
+                JSONObject jsonObject = new JSONObject()
+                        .put("payload", bytesToHex(data));
+                logEvent("bluetooth_classic_serial_write", jsonObject);
+            }
+        });
+
+        findAndHookMethod("android.bluetooth.BluetoothInputStream", pck.classLoader, "read", byte[].class, int.class, int.class, new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                super.afterHookedMethod(param);
+
+                byte[] data = (byte[]) param.args[0];
+                JSONObject jsonObject = new JSONObject()
+                        .put("payload", bytesToHex(data));
+                logEvent("bluetooth_classic_serial_read", jsonObject);
+            }
+        });
     }
 
     private void hookBLENotify(final XC_LoadPackage.LoadPackageParam pck){
@@ -80,9 +105,90 @@ public class MainHook implements IXposedHookLoadPackage {
 
                 JSONObject eventObject = new JSONObject()
                         .put("characteristic", characteristic.getUuid())
-                        .put("payload", Base64.encodeToString(value, 0));
+                        .put("payload", Base64.encodeToString(value, Base64.NO_WRAP));
 
                 logEvent("ble_notify_characteristic", eventObject);
+            }
+        });
+    }
+
+    private void hookCipher(){
+        XC_MethodHook cipherHook = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                super.afterHookedMethod(param);
+
+                Cipher cipher = (Cipher) param.thisObject;
+
+                String algorithm = cipher.getAlgorithm();
+                String iv = Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP);
+                String input = Base64.encodeToString((byte[]) param.args[0], Base64.NO_WRAP);
+                String result = Base64.encodeToString((byte[]) param.getResult(), Base64.NO_WRAP);
+
+                Field opModeField = cipher.getClass().getDeclaredField("opmode");
+                opModeField.setAccessible(true);
+                int opmode = opModeField.getInt(cipher);
+                boolean isEncrypting = opmode == Cipher.ENCRYPT_MODE;
+                String eventType = isEncrypting ? "crypt_encrypt" : "crypt_decrypt";
+
+                JSONObject eventObject = new JSONObject()
+                        .put("algorithm", algorithm)
+                        .put("input", input)
+                        .put("result", result);
+
+                logEvent(eventType, eventObject);
+            }
+        };
+
+        findAndHookMethod(Cipher.class, "doFinal", byte[].class, cipherHook);
+        findAndHookMethod(Cipher.class, "doFinal", byte[].class, int.class, int.class, cipherHook);
+
+        findAndHookConstructor(IvParameterSpec.class, byte[].class, int.class, int.class, new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                super.beforeHookedMethod(param);
+                JSONObject eventObject = new JSONObject()
+                        .put("iv", Base64.encodeToString((byte[]) param.args[0], Base64.NO_WRAP));
+                logEvent("crypt_create_iv", eventObject);
+            }
+        });
+
+        findAndHookMethod(KeyAgreement.class, "generateSecret", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                super.afterHookedMethod(param);
+
+                byte[] result = (byte[]) param.getResult();
+                JSONObject resultObject = new JSONObject()
+                        .put("result", Base64.encodeToString(result, Base64.NO_WRAP));
+
+                logEvent("dh_result", resultObject);
+            }
+        });
+
+        findAndHookMethod(KeyAgreement.class, "generateSecret", byte[].class, int.class, new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                super.afterHookedMethod(param);
+
+                byte[] result = (byte[]) param.args[0];
+                JSONObject resultObject = new JSONObject()
+                        .put("result", Base64.encodeToString(result, Base64.NO_WRAP));
+
+                logEvent("dh_result", resultObject);
+            }
+        });
+
+        findAndHookMethod(KeyAgreement.class, "generateSecret", String.class, new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                super.afterHookedMethod(param);
+
+                byte[] result = (byte[]) param.args[0];
+                JSONObject resultObject = new JSONObject()
+                        .put("algorithm", (String) param.args[0]);
+
+                logEvent("dh_result", resultObject);
             }
         });
     }
@@ -116,7 +222,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
                 JSONObject eventObject = new JSONObject()
                         .put("characteristic", characteristic.getUuid())
-                        .put("payload", Base64.encodeToString(characteristic.getValue(), 0));
+                        .put("payload", Base64.encodeToString(characteristic.getValue(), Base64.NO_WRAP));
 
                 logEvent("ble_write_characteristic", eventObject);
             }
@@ -136,7 +242,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
                 JSONObject eventObject = new JSONObject()
                         .put("descriptor", descriptor.getUuid())
-                        .put("payload", Base64.encodeToString(descriptor.getValue(), 0));
+                        .put("payload", Base64.encodeToString(descriptor.getValue(), Base64.NO_WRAP));
 
                 logEvent("ble_write_descriptor", eventObject);
             }
